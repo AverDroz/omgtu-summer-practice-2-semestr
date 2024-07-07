@@ -36,3 +36,311 @@
 1. [Паттерн Сообщение](https://www.enterpriseintegrationpatterns.com/patterns/messaging/Message.html)
 2. [Паттерн Роутер - весь раздел про Роутеры](https://www.enterpriseintegrationpatterns.com/patterns/messaging/MessageRoutingIntro.html)
 3. [Обмен сообщеними](https://www.enterpriseintegrationpatterns.com/patterns/messaging/MessageConstructionIntro.html)
+
+#!csharp
+
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Threading;
+
+public interface ICommand
+{
+    void Execute();
+    bool IsCompleted { get; }
+}
+
+public interface IScheduler
+{
+    bool HasCommand();
+    ICommand Select();
+    void Add(ICommand cmd);
+}
+
+public class Message
+{
+    public int CommandId { get; }
+    public string Data { get; }
+
+    public Message(int commandId, string data)
+    {
+        CommandId = commandId;
+        Data = data;
+    }
+}
+
+public class RoundRobinScheduler : IScheduler
+{
+    private readonly Queue<ICommand> commandQueue = new Queue<ICommand>();
+
+    public bool HasCommand()
+    {
+        return commandQueue.Count > 0;
+    }
+
+    public ICommand Select()
+    {
+        if (commandQueue.Count > 0)
+        {
+            ICommand cmd = commandQueue.Dequeue();
+            return cmd;
+        }
+        return null;
+    }
+
+    public void Add(ICommand cmd)
+    {
+        commandQueue.Enqueue(cmd);
+    }
+}
+
+public class ServerThread
+{
+    private readonly Thread thread;
+    private readonly ConcurrentQueue<Message> messageQueue = new ConcurrentQueue<Message>();
+    private readonly AutoResetEvent newMessageEvent = new AutoResetEvent(false);
+    private readonly IScheduler scheduler;
+    private readonly RouterCommand router;
+    private bool stopImmediately = false;
+    private bool stopWhenQueueIsEmpty = false;
+
+    public Thread Thread => thread;
+
+    public ServerThread(IScheduler scheduler, RouterCommand router)
+    {
+        this.scheduler = scheduler;
+        this.router = router;
+        thread = new Thread(Run);
+        thread.Start();
+    }
+
+    private void Run()
+    {
+        while (!stopImmediately)
+        {
+            if (stopWhenQueueIsEmpty && !scheduler.HasCommand())
+            {
+                break;
+            }
+
+            while (messageQueue.TryDequeue(out Message message))
+            {
+                router.EnqueueMessage(message);
+            }
+
+            if (scheduler.HasCommand())
+            {
+                ICommand command = scheduler.Select();
+                if (command != null)
+                {
+                    try
+                    {
+                        command.Execute();
+                        Thread.Sleep(100);
+                        if (!command.IsCompleted)
+                        {
+                            scheduler.Add(command);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        HandleException(ex);
+                    }
+                }
+            }
+            else
+            {
+                newMessageEvent.WaitOne();
+            }
+        }
+    }
+
+    public void EnqueueMessage(Message message)
+    {
+        messageQueue.Enqueue(message);
+        newMessageEvent.Set();
+    }
+
+    public void EnqueueCommand(ICommand command)
+    {
+        scheduler.Add(command);
+        newMessageEvent.Set();
+    }
+
+    public void StopImmediately()
+    {
+        stopImmediately = true;
+        newMessageEvent.Set();
+    }
+
+    public void StopWhenQueueIsEmpty()
+    {
+        stopWhenQueueIsEmpty = true;
+        newMessageEvent.Set();
+    }
+
+    private void HandleException(Exception ex)
+    {
+        Console.WriteLine($"Exception handled: {ex.Message}");
+    }
+}
+
+public class RouterCommand : ICommand
+{
+    private readonly Dictionary<int, Queue<Message>> commandQueues = new Dictionary<int, Queue<Message>>();
+
+    public bool IsCompleted => false;
+
+    public void RegisterCommand(int commandId, Queue<Message> queue)
+    {
+        commandQueues[commandId] = queue;
+    }
+
+    public void UnregisterCommand(int commandId)
+    {
+        commandQueues.Remove(commandId);
+    }
+
+    public void EnqueueMessage(Message message)
+    {
+        if (commandQueues.ContainsKey(message.CommandId))
+        {
+            commandQueues[message.CommandId].Enqueue(message);
+        }
+        else
+        {
+            Console.WriteLine($"Message for unknown command ID {message.CommandId}: {message.Data}");
+        }
+    }
+
+    public void Execute()
+    {
+        // Чиллим
+    }
+}
+
+public class LongRunningCommand : ICommand
+{
+    private readonly Queue<Message> messageQueue;
+    private int remainingWork;
+
+    public bool IsCompleted => remainingWork <= 0;
+    public int Id { get; }
+
+    public LongRunningCommand(int id, int remainingWork, Queue<Message> messageQueue)
+    {
+        Id = id;
+        this.remainingWork = remainingWork;
+        this.messageQueue = messageQueue;
+    }
+
+    public void Execute()
+    {
+        while (messageQueue.Count > 0)
+        {
+            var message = messageQueue.Dequeue();
+            Console.WriteLine($"Команда номер {Id} получила сообщение: {message.Data}");
+        }
+
+        if (remainingWork > 0)
+        {
+            Console.WriteLine($"Команда номер {Id}, оставшееся время - {remainingWork - 1}");
+            remainingWork--;
+        }
+    }
+}
+
+public class SoftStopCommand : ICommand
+{
+    private readonly ServerThread serverThread;
+
+    public bool IsCompleted => true;
+
+    public SoftStopCommand(ServerThread serverThread)
+    {
+        this.serverThread = serverThread;
+    }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread != serverThread.Thread)
+        {
+            throw new InvalidOperationException("SoftStopCommand can only be executed in its own thread.");
+        }
+        serverThread.StopWhenQueueIsEmpty();
+    }
+}
+
+public class HardStopCommand : ICommand
+{
+    private readonly ServerThread serverThread;
+
+    public bool IsCompleted => true;
+
+    public HardStopCommand(ServerThread serverThread)
+    {
+        this.serverThread = serverThread;
+    }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread != serverThread.Thread)
+        {
+            throw new InvalidOperationException("HardStopCommand can only be executed in its own thread.");
+        }
+        serverThread.StopImmediately();
+    }
+}
+
+
+IScheduler scheduler = new RoundRobinScheduler();
+RouterCommand router = new RouterCommand();
+ServerThread serverThread = new ServerThread(scheduler, router);
+
+var queue1 = new Queue<Message>();
+var queue2 = new Queue<Message>();
+
+var longRunningCommand1 = new LongRunningCommand(1, 4, queue1);
+var longRunningCommand2 = new LongRunningCommand(2, 2, queue2);
+
+router.RegisterCommand(1, queue1);
+router.RegisterCommand(2, queue2);
+
+scheduler.Add(longRunningCommand1);
+scheduler.Add(longRunningCommand2);
+
+serverThread.EnqueueMessage(new Message(1, "Первое сообщение для команды 1"));
+serverThread.EnqueueMessage(new Message(2, "Первое сообщение для команды 2"));
+serverThread.EnqueueMessage(new Message(1, "Второе сообщение для команды 1"));
+serverThread.EnqueueMessage(new Message(696969, "Сообщение для несуществующей команды"));
+
+serverThread.EnqueueCommand(new SoftStopCommand(serverThread));
+
+serverThread.Thread.Join();
+Console.WriteLine("Server thread stopped.");
+
+#!markdown
+
+мой вывод:
+
+Команда номер 1 получила сообщение: Первое сообщение для команды 1
+
+Команда номер 1, оставшееся время - 3
+
+Message for unknown command ID 696969: Сообщение для несуществующей команды
+
+Команда номер 2 получила сообщение: Первое сообщение для команды 2
+
+Команда номер 2, оставшееся время - 1
+
+Команда номер 1 получила сообщение: Второе сообщение для команды 1
+
+Команда номер 1, оставшееся время - 2
+
+Команда номер 2, оставшееся время - 0
+
+Команда номер 1, оставшееся время - 1
+
+Команда номер 1, оставшееся время - 0
+
+Server thread stopped.
