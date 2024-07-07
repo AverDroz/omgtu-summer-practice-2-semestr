@@ -20,15 +20,28 @@
 
 #!csharp
 
-interface ICommand
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Threading;
+
+public interface ICommand
 {
     void Execute();
+    bool IsCompleted { get; }
 }
 
 
-public class TestCommand(int id) : ICommand
+public class TestCommand : ICommand
 {
-    int counter = 0;
+    int id;
+    public int counter = 0;
+    public bool IsCompleted => false;
+
+    public TestCommand(int id)
+    {
+        this.id = id;
+    }
 
     public void Execute()
     {
@@ -36,6 +49,216 @@ public class TestCommand(int id) : ICommand
     }
 }
 
+
+
+public interface IScheduler
+{
+    bool HasCommand();
+    ICommand Select();
+    void Add(ICommand cmd);
+}
+
+public class RoundRobinScheduler : IScheduler
+{
+    private readonly Queue<ICommand> commandQueue = new Queue<ICommand>();
+
+    public bool HasCommand()
+    {
+        return commandQueue.Count > 0;
+    }
+
+    public ICommand Select()
+    {
+        int initialCount = commandQueue.Count;
+        if (initialCount > 0)
+        {
+            for (int i = 0; i < initialCount; i++)
+            {
+                ICommand cmd = commandQueue.Dequeue();
+                return cmd;
+            }
+        }
+        return null;
+    }
+
+    public void Add(ICommand cmd)
+    {
+        commandQueue.Enqueue(cmd);
+    }
+}
+
+public class ServerThread
+{
+    private readonly Thread thread;
+    private readonly AutoResetEvent newCommandEvent = new AutoResetEvent(false);
+    private readonly IScheduler scheduler;
+    private bool stopImmediately = false;
+    private bool stopWhenQueueIsEmpty = false;
+
+    public Thread Thread => thread;
+
+    public ServerThread(IScheduler scheduler)
+    {
+        this.scheduler = scheduler;
+        thread = new Thread(Run);
+        thread.Start();
+    }
+
+    private void Run()
+    {
+        while (!stopImmediately)
+        {
+            if (stopWhenQueueIsEmpty && !scheduler.HasCommand())
+            {
+                break;
+            }
+
+            if (scheduler.HasCommand())
+            {
+                ICommand command = scheduler.Select();
+                if (command != null)
+                {
+                    try
+                    {
+                        command.Execute(); // работа
+                        Thread.Sleep(100); // имитация работы
+                        if (!command.IsCompleted)
+                        {
+                            EnqueueCommand(command);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        HandleException(ex);
+                    }
+                }
+            }
+            else
+            {
+                newCommandEvent.WaitOne();
+            }
+        }
+    }
+
+    public void EnqueueCommand(ICommand command)
+    {
+        scheduler.Add(command);
+        newCommandEvent.Set();
+    }
+
+    public void StopImmediately()
+    {
+        stopImmediately = true;
+        newCommandEvent.Set();
+    }
+
+    public void StopWhenQueueIsEmpty()
+    {
+        stopWhenQueueIsEmpty = true;
+        newCommandEvent.Set();
+    }
+
+    private void HandleException(Exception ex)
+    {
+        Console.WriteLine($"Exception handled: {ex.Message}");
+    }
+}
+
+private class SoftStopCommand : ICommand
+{
+    private readonly ServerThread serverThread;
+
+    public bool IsCompleted => true;
+
+    public SoftStopCommand(ServerThread serverThread)
+    {
+        this.serverThread = serverThread;
+    }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread != serverThread.Thread)
+        {
+            throw new InvalidOperationException("SoftStopCommand can only be executed in its own thread.");
+        }
+        serverThread.StopWhenQueueIsEmpty();
+    }
+}
+
+private class HardStopCommand : ICommand
+{
+    private readonly ServerThread serverThread;
+
+    public bool IsCompleted => true;
+
+    public HardStopCommand(ServerThread serverThread)
+    {
+        this.serverThread = serverThread;
+    }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread != serverThread.Thread)
+        {
+            throw new InvalidOperationException("HardStopCommand can only be executed in its own thread.");
+        }
+        serverThread.StopImmediately();
+    }
+}
+
+IScheduler scheduler = new RoundRobinScheduler();
+ServerThread serverThread = new ServerThread(scheduler);
+
+TestCommand first = new TestCommand(1);
+
+serverThread.EnqueueCommand(first);
+serverThread.EnqueueCommand(new TestCommand(2));
+serverThread.EnqueueCommand(new TestCommand(3));
+serverThread.EnqueueCommand(new TestCommand(4));
+serverThread.EnqueueCommand(new TestCommand(5));
+
+while(first.counter < 3){}
+serverThread.EnqueueCommand(new HardStopCommand(serverThread));
+
+serverThread.Thread.Join();
+Console.WriteLine("Server thread stopped.");
+
 #!markdown
 
 Необходимо проиллюстрировать выполнение 5 экземпляров TestCommand 3 раза, затем остановить поток с помощью HardStop.
+
+#!markdown
+
+мой вывод:
+
+Поток 1 вызов 1
+
+Поток 2 вызов 1
+
+Поток 3 вызов 1
+
+Поток 4 вызов 1
+
+Поток 5 вызов 1
+
+Поток 1 вызов 2
+
+Поток 2 вызов 2
+
+Поток 3 вызов 2
+
+Поток 4 вызов 2
+
+Поток 5 вызов 2
+
+Поток 1 вызов 3
+
+Поток 2 вызов 3
+
+Поток 3 вызов 3
+
+Поток 4 вызов 3
+
+Поток 5 вызов 3
+
+Server thread stopped.
