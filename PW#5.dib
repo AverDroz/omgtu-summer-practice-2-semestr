@@ -55,12 +55,34 @@ class Message
 
 #!csharp
 
+using System;
 using System.Collections.Concurrent;
+using System.Threading;
 
-var queue1 = new BlockingCollection<Message>(2); //очередь первого потока
-var queue2 = new BlockingCollection<Message>(2); //очередь второго потока
+var queue1 = new BlockingCollection<Message>(2); 
+var queue2 = new BlockingCollection<Message>(2); 
+queue1.Add(new Message());
 
-// Здесь писать решение
+void ProcessQueue(BlockingCollection<Message> myQueue, BlockingCollection<Message> otherQueue)
+{
+    for (int i = 0; i < 100; i++)
+    {
+        var message = myQueue.Take();
+        message.Handle();
+        otherQueue.Add(new Message());
+    }
+}
+
+var thread1 = new Thread(() => ProcessQueue(queue1, queue2));
+var thread2 = new Thread(() => ProcessQueue(queue2, queue1));
+
+thread1.Start();
+thread2.Start();
+
+thread1.Join();
+thread2.Join();
+
+var last_message = queue1.Take();
 
 #!csharp
 
