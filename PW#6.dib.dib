@@ -37,10 +37,213 @@
 Для этого следует использовать условные события, которые позволят убедиться, что оба потока запустились и готовы читать и писать объекты и только потом запускать таймер.
 2. Для итогового вывода сравнивать усредненные значения.
 
-#!markdown
+#!csharp
 
-// здесь писать код
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+
+int iterations = 10;
+int numElements = 1000000;
+var blockingCollectionTimes = new (double writeTime, double readTime)[iterations];
+var concurrentQueueTimes = new (double writeTime, double readTime)[iterations];
+var nonThreadSafeQueueTimes = new (double writeTime, double readTime)[iterations];
+
+// Измерение BlockingCollection
+for (int i = 0; i < iterations; i++)
+{
+    var collection = new BlockingCollection<int>();
+    var writeEvent = new ManualResetEvent(false);
+    var readEvent = new ManualResetEvent(false);
+
+    Task writer = Task.Run(() =>
+    {
+        writeEvent.WaitOne();
+        var stopwatch = Stopwatch.StartNew();
+        for (int j = 0; j < numElements; j++)
+        {
+            collection.Add(j);
+        }
+        collection.CompleteAdding();
+        stopwatch.Stop();
+        blockingCollectionTimes[i].writeTime = stopwatch.Elapsed.TotalMilliseconds;
+    });
+
+    Task reader = Task.Run(() =>
+    {
+        readEvent.WaitOne();
+        var stopwatch = Stopwatch.StartNew();
+        foreach (var item in collection.GetConsumingEnumerable())
+        {
+            // Просто читаем
+        }
+        stopwatch.Stop();
+        blockingCollectionTimes[i].readTime = stopwatch.Elapsed.TotalMilliseconds;
+    });
+
+    writeEvent.Set();
+    readEvent.Set();
+
+    Task.WaitAll(writer, reader);
+}
+
+// Измерение ConcurrentQueue
+for (int i = 0; i < iterations; i++)
+{
+    var queue = new ConcurrentQueue<int>();
+    var writeEvent = new ManualResetEvent(false);
+    var readEvent = new ManualResetEvent(false);
+
+    Task writer = Task.Run(() =>
+    {
+        writeEvent.WaitOne();
+        var stopwatch = Stopwatch.StartNew();
+        for (int j = 0; j < numElements; j++)
+        {
+            queue.Enqueue(j);
+        }
+        stopwatch.Stop();
+        concurrentQueueTimes[i].writeTime = stopwatch.Elapsed.TotalMilliseconds;
+    });
+
+    Task reader = Task.Run(() =>
+    {
+        readEvent.WaitOne();
+        var stopwatch = Stopwatch.StartNew();
+        while (queue.TryDequeue(out var item))
+        {
+            // Просто читаем
+        }
+        stopwatch.Stop();
+        concurrentQueueTimes[i].readTime = stopwatch.Elapsed.TotalMilliseconds;
+    });
+
+    writeEvent.Set();
+    readEvent.Set();
+
+    Task.WaitAll(writer, reader);
+}
+
+// Измерение непотокобезопасной очереди
+for (int i = 0; i < iterations; i++)
+{
+    var queue = new Queue<int>();
+
+    var writeStopwatch = Stopwatch.StartNew();
+    for (int j = 0; j < numElements; j++)
+    {
+        queue.Enqueue(j);
+    }
+    writeStopwatch.Stop();
+    nonThreadSafeQueueTimes[i].writeTime = writeStopwatch.Elapsed.TotalMilliseconds;
+
+    var readStopwatch = Stopwatch.StartNew();
+    while (queue.Count > 0)
+    {
+        queue.Dequeue();
+    }
+    readStopwatch.Stop();
+    nonThreadSafeQueueTimes[i].readTime = readStopwatch.Elapsed.TotalMilliseconds;
+}
+
+double avgBlockingWriteTime = Math.Round(blockingCollectionTimes.Average(x => x.writeTime));
+double avgBlockingReadTime = Math.Round(blockingCollectionTimes.Average(x => x.readTime));
+
+double avgConcurrentWriteTime = Math.Round(concurrentQueueTimes.Average(x => x.writeTime));
+double avgConcurrentReadTime = Math.Round(concurrentQueueTimes.Average(x => x.readTime));
+
+double avgNonThreadSafeWriteTime = Math.Round(nonThreadSafeQueueTimes.Average(x => x.writeTime));
+double avgNonThreadSafeReadTime = Math.Round(nonThreadSafeQueueTimes.Average(x => x.readTime));
+
+Console.WriteLine($"BlockingCollection - Среднее время записи: {avgBlockingWriteTime} мс, Среднее время чтения: {avgBlockingReadTime} мс");
+Console.WriteLine($"ConcurrentQueue - Среднее время записи: {avgConcurrentWriteTime} мс, Среднее время чтения: {avgConcurrentReadTime} мс");
+Console.WriteLine($"Непотокобезопасная очередь - Среднее время записи: {avgNonThreadSafeWriteTime} мс, Среднее время чтения: {avgNonThreadSafeReadTime} мс");
+
+// Сравнение в процентах
+double blockingToNonThreadSafeWrite = Math.Round((avgBlockingWriteTime - avgNonThreadSafeWriteTime) / avgNonThreadSafeWriteTime * 100);
+double blockingToNonThreadSafeRead = Math.Round((avgBlockingReadTime - avgNonThreadSafeReadTime) / avgNonThreadSafeReadTime * 100);
+
+double concurrentToNonThreadSafeWrite = Math.Round((avgConcurrentWriteTime - avgNonThreadSafeWriteTime) / avgNonThreadSafeWriteTime * 100);
+double concurrentToNonThreadSafeRead = Math.Round((avgConcurrentReadTime - avgNonThreadSafeReadTime) / avgNonThreadSafeReadTime * 100);
+
+Console.WriteLine($"BlockingCollection на {blockingToNonThreadSafeWrite}% медленнее, чем непотокобезопасная очередь для записи.");
+Console.WriteLine($"BlockingCollection на {blockingToNonThreadSafeRead}% медленнее, чем непотокобезопасная очередь для чтения.");
+
+Console.WriteLine($"ConcurrentQueue на {concurrentToNonThreadSafeWrite}% медленнее, чем непотокобезопасная очередь для записи.");
+Console.WriteLine($"ConcurrentQueue на {concurrentToNonThreadSafeRead}% медленнее, чем непотокобезопасная очередь для чтения.");
+
+#!csharp
+
+#r "nuget: ScottPlot, 5.0.35"
+
+using Microsoft.DotNet.Interactive.Formatting;
+Formatter.Register(typeof(ScottPlot.Plot), (p, w) => 
+    w.Write(((ScottPlot.Plot)p).GetImageHtml(900, 600)), HtmlFormatter.MimeType);
+ScottPlot.Plot plt = new();
+
+Console.WriteLine("Запись: ");
+var scatter1 =  plt.Add.Scatter(Enumerable.Range(1, 10).Select(x => (double)x).ToArray(),blockingCollectionTimes.Select(x => x.writeTime).ToArray());
+scatter1.LegendText = "BlockingCollection";
+var scatter2 = plt.Add.Scatter(Enumerable.Range(1, 10).Select(x => (double)x).ToArray(), concurrentQueueTimes.Select(x => x.writeTime).ToArray());
+scatter2.LegendText = "ConcurrentQueue";
+var scatter3 = plt.Add.Scatter(Enumerable.Range(1, 10).Select(x => (double)x).ToArray(), nonThreadSafeQueueTimes.Select(x => x.writeTime).ToArray());
+scatter3.LegendText = "непотокобезопасная очередь";
+plt.XLabel("Номер итерации");
+plt.YLabel("Время, ms");
+
+plt
+
+#!csharp
+
+ScottPlot.Plot plt2 = new();
+Console.WriteLine("Чтение: ");
+var scatter4 =  plt2.Add.Scatter(Enumerable.Range(1, 10).Select(x => (double)x).ToArray(),blockingCollectionTimes.Select(x => x.readTime).ToArray());
+scatter4.LegendText = "BlockingCollection";
+var scatter5 = plt2.Add.Scatter(Enumerable.Range(1, 10).Select(x => (double)x).ToArray(), concurrentQueueTimes.Select(x => x.readTime).ToArray());
+scatter5.LegendText = "ConcurrentQueue";
+var scatter6 = plt2.Add.Scatter(Enumerable.Range(1, 10).Select(x => (double)x).ToArray(), nonThreadSafeQueueTimes.Select(x => x.readTime).ToArray());
+scatter6.LegendText = "непотокобезопасная очередь";
+plt2.XLabel("Номер итерации");
+plt2.YLabel("Время, ms");
+
+plt2
 
 #!markdown
 
 ## Вывод
+Полученные данные:
+
+BlockingCollection - Среднее время записи: 145 мс, Среднее время чтения: 145 мс
+
+ConcurrentQueue - Среднее время записи: 12 мс, Среднее время чтения: 3 мс
+
+Непотокобезопасная очередь - Среднее время записи: 6 мс, Среднее время чтения: 3 мс
+
+BlockingCollection на 2317% медленнее, чем непотокобезопасная очередь для записи.
+
+BlockingCollection на 4733% медленнее, чем непотокобезопасная очередь для чтения.
+
+ConcurrentQueue на 100% медленнее, чем непотокобезопасная очередь для записи.
+
+ConcurrentQueue на 0% медленнее, чем непотокобезопасная очередь для чтения.
+
+-------------------------------------------------------------------------------------------
+
+ConcurrentQueue записывает в два раза медленнее {на 100% медленнее} чем непотокобезопасная очередь, читает так же.
+
+Из чего можно сделать вывод, что BlockingCollection сильно отстает по скорости от остальных, ConcurrentQueue работает по скорости на уровне непотокобезопасной очереди {по сравнению с BlockingCollection - видно на графиках} при том что обладает защитой.
+
+оптимальная коллекция - ConcurrentQueue;
+
+#!markdown
+
+Мои графики:
+
+
+![1](image.png)
+
+![2](image-1.png)
