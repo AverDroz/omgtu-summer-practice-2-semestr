@@ -38,3 +38,203 @@ ServerThread может менять свое поведение для обра
 Отсутствие Команд в очереди потока не должно требовать значительных затрат процессорного времени. Значительными считаются затраты, которые зависят от времени простоя потока.
 
 Написать проверку, которая гарантирует правильное выполнение команд HardStop и SoftStop.
+
+#!csharp
+
+using System;
+using System.Collections.Concurrent;
+using System.Threading;
+
+public class ServerThread
+{
+    private Thread thread;
+    private ConcurrentQueue<ICommand> commandQueue = new ConcurrentQueue<ICommand>();
+    private AutoResetEvent newCommandEvent = new AutoResetEvent(false);
+    private bool stopImmediately = false;
+    private bool stopWhenQueueIsEmpty = false;
+
+    public Thread Thread => thread; //можем прочитать поток, но не изменять
+
+    public ServerThread()
+    {
+        thread = new Thread(Run);
+        thread.Start();
+    }
+
+    private void Run()
+    {
+        while (!stopImmediately)
+        {
+            if (stopWhenQueueIsEmpty && commandQueue.IsEmpty)
+            {
+                break;
+            }
+
+            if (commandQueue.TryDequeue(out ICommand command))
+            {
+                try
+                {
+                    command.Execute();
+                }
+                catch (Exception ex)
+                {
+                    HandleException(ex);
+                }
+            }
+            else
+            {
+                // Await приказы
+                newCommandEvent.WaitOne();
+            }
+        }
+    }
+
+    public void EnqueueCommand(ICommand command)
+    {
+        commandQueue.Enqueue(command);
+        newCommandEvent.Set();
+    }
+
+    public void StopImmediately()
+    {
+        stopImmediately = true;
+        newCommandEvent.Set();
+    }
+
+    public void StopWhenQueueIsEmpty()
+    {
+        stopWhenQueueIsEmpty = true;
+        newCommandEvent.Set();
+    }
+
+    private void HandleException(Exception ex)
+    {
+        Console.WriteLine($"Exception handled: {ex.Message}");
+        // Необязательный HandleException
+    }
+}
+
+#!csharp
+
+public class HardStopCommand : ICommand
+{
+    private ServerThread serverThread;
+
+    public HardStopCommand(ServerThread serverThread)
+    {
+        this.serverThread = serverThread;
+    }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread != serverThread.Thread)
+        {
+            throw new InvalidOperationException("HardStopCommand can only be executed in its own thread.");
+        }
+        serverThread.StopImmediately();
+    }
+}
+
+public class SoftStopCommand : ICommand
+{
+    private ServerThread serverThread;
+
+    public SoftStopCommand(ServerThread serverThread)
+    {
+        this.serverThread = serverThread;
+    }
+
+    public void Execute()
+    {
+        if (Thread.CurrentThread != serverThread.Thread)
+        {
+            throw new InvalidOperationException("SoftStopCommand can only be executed in its own thread.");
+        }
+        serverThread.StopWhenQueueIsEmpty();
+    }
+}
+
+#!csharp
+
+ private class VERY_IMPORTANT_COMMAND : ICommand
+    {
+        private int id;
+
+        public VERY_IMPORTANT_COMMAND(int id)
+        {
+            this.id = id;
+        }
+
+        public void Execute()
+        {
+            Console.Write($"VERY IMPORTANT COMMAND NUMBER {id}: ");
+            Thread.Sleep(500); // Симуляция полезности
+            Console.WriteLine("COMPLETED");
+        }
+    }
+
+    private class DEAD_END : ICommand
+    {
+        private int id;
+
+        public DEAD_END(int id)
+        {
+            this.id = id;
+        }
+
+        public void Execute()
+        {
+            Console.WriteLine($"DEAD COMMAND NUMBER {id}: ");
+            int a = 0;
+            Console.WriteLine(8274532 / a);
+            Console.WriteLine("COMPLETED");
+        }
+    }
+
+//--------------------ПРОВЕРКА HARDSTOP--------------------
+Console.WriteLine("--------------------ПРОВЕРКА HARDSTOP--------------------");
+ServerThread serverThread = new ServerThread();
+
+for (int i = 0; i < 5; i++)
+{
+    serverThread.EnqueueCommand(new VERY_IMPORTANT_COMMAND(i));
+}
+
+serverThread.EnqueueCommand(new HardStopCommand(serverThread));
+
+for (int i = 0; i < 9999; i++) // конечная бесконечность если hardstop не работает
+{
+    serverThread.EnqueueCommand(new VERY_IMPORTANT_COMMAND(i));
+}
+
+serverThread.Thread.Join(); 
+
+Console.WriteLine("suckessfully {если выполнено 5 команд а их выполнено 5}");
+Console.WriteLine();
+
+//--------------------ПРОВЕРКА SOFTSTOP--------------------
+Console.WriteLine("--------------------ПРОВЕРКА SOFTSTOP--------------------");
+ServerThread serverThread2 = new ServerThread();
+
+for (int i = 0; i < 5; i++)
+{
+    serverThread2.EnqueueCommand(new VERY_IMPORTANT_COMMAND(i));
+}
+
+serverThread2.EnqueueCommand(new SoftStopCommand(serverThread2));
+
+for (int i = 5; i < 9; i++) // допы
+{
+    serverThread2.EnqueueCommand(new VERY_IMPORTANT_COMMAND(i));
+}
+
+serverThread2.Thread.Join();
+
+Console.WriteLine("suckessfully {если выполнено 9 команд а их выполнено 9}");
+
+//--------------------ПРОВЕРКА HANDLE EXCEPTION--------------------
+Console.WriteLine("--------------------ПРОВЕРКА HANDLE EXCEPTION--------------------");
+ServerThread serverThread3 = new ServerThread();
+serverThread3.EnqueueCommand(new DEAD_END(69));
+serverThread3.EnqueueCommand(new SoftStopCommand(serverThread3));
+serverThread3.Thread.Join();
